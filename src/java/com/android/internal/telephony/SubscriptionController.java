@@ -31,6 +31,7 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.database.ContentObserver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -95,7 +96,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * Implementation of the ISub interface.
@@ -905,6 +905,19 @@ public class SubscriptionController extends ISub.Stub {
     @Override
     public List<SubscriptionInfo> getAllSubInfoList(String callingPackage,
             String callingFeatureId) {
+        return getAllSubInfoList(callingPackage, callingFeatureId, false);
+    }
+
+    /**
+     * @param callingPackage The package making the IPC.
+     * @param callingFeatureId The feature in the package
+     * @param skipConditionallyRemoveIdentifier if set, skip removing identifier conditionally
+     * @return List of all SubscriptionInfo records in database,
+     * include those that were inserted before, maybe empty but not null.
+     * @hide
+     */
+    public List<SubscriptionInfo> getAllSubInfoList(String callingPackage,
+            String callingFeatureId, boolean skipConditionallyRemoveIdentifier) {
         if (VDBG) logd("[getAllSubInfoList]+");
 
         // This API isn't public, so no need to provide a valid subscription ID - we're not worried
@@ -923,9 +936,9 @@ public class SubscriptionController extends ISub.Stub {
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
-        if (subList != null) {
+        if (subList != null && !skipConditionallyRemoveIdentifier) {
             if (VDBG) logd("[getAllSubInfoList]- " + subList.size() + " infos return");
-            subList.stream().map(
+            subList = subList.stream().map(
                     subscriptionInfo -> conditionallyRemoveIdentifiers(subscriptionInfo,
                             callingPackage, callingFeatureId, "getAllSubInfoList"))
                     .collect(Collectors.toList());
@@ -1334,6 +1347,12 @@ public class SubscriptionController extends ISub.Stub {
             String selection = SubscriptionManager.ICC_ID + "=?";
             String[] args;
             if (isSubscriptionForRemoteSim(subscriptionType)) {
+                PackageManager packageManager = mContext.getPackageManager();
+                if (!packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE)) {
+                    logel("[addSubInfo] Remote SIM can only be added when FEATURE_AUTOMOTIVE"
+                            + " is supported");
+                    return -1;
+                }
                 selection += " AND " + SubscriptionManager.SUBSCRIPTION_TYPE + "=?";
                 args = new String[]{uniqueId, Integer.toString(subscriptionType)};
             } else {
@@ -3890,8 +3909,10 @@ public class SubscriptionController extends ISub.Stub {
         List<SubscriptionInfo> subInfoList;
 
         try {
+            // need to bypass removing identifier check because that will remove the subList without
+            // group id.
             subInfoList = getAllSubInfoList(mContext.getOpPackageName(),
-                    mContext.getAttributionTag());
+                    mContext.getAttributionTag(), true);
             if (groupUuid == null || subInfoList == null || subInfoList.isEmpty()) {
                 return new ArrayList<>();
             }
